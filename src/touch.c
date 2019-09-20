@@ -122,5 +122,5 @@ void injectTouchEvent(int down, int x, int y, struct fb_var_screeninfo* scrinfo)
         error_print("write event failed, %s\n", strerror(errno));
     }
 
-    debug_print("injectTouchEvent (screen(%d,%d) -> touch(%d,%d), down=%d)\n", xin , yin, x , y, down);
+    //printf("injectTouchEvent (screen(%d,%d) -> touch(%d,%d), down=%d)\n", xin , yin, x , y, down);
 }
