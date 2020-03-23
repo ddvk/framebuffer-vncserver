@@ -52,6 +52,7 @@ static char touch_device[256] = "";
 static char kbd_device[256] = "";
 
 static struct fb_var_screeninfo scrinfo;
+static struct fb_fix_screeninfo fixscrinfo;
 static int fbfd = -1;
 static unsigned short int *fbmmap = MAP_FAILED;
 static unsigned short int *vncbuf;
@@ -63,7 +64,10 @@ static rfbScreenInfoPtr server;
 static size_t bytespp;
 static unsigned int bits_per_pixel;
 static unsigned int frame_size;
+static unsigned int buffer_size;
 int verbose = 0;
+static int padding32;
+static int padding8;
 
 #define UNUSED(x) (void)(x)
 
@@ -100,22 +104,32 @@ static void init_fb(void)
         exit(EXIT_FAILURE);
     }
 
+    if (ioctl(fbfd, FBIOGET_FSCREENINFO, &fixscrinfo) != 0)
+    {
+        error_print("ioctl(FBIOGET_VSCREENINFO)");
+        exit(EXIT_FAILURE);
+    }
+
     pixels = scrinfo.xres * scrinfo.yres;
     bytespp = scrinfo.bits_per_pixel / 8;
     bits_per_pixel = scrinfo.bits_per_pixel;
     frame_size = pixels * bits_per_pixel / 8;
+    buffer_size = fixscrinfo.line_length * scrinfo.yres;
+    padding8 = fixscrinfo.line_length - bytespp*scrinfo.xres;
+    padding32 = padding8 / 4;
 
     info_print("  xres=%d, yres=%d, xresv=%d, yresv=%d, xoffs=%d, yoffs=%d, bpp=%d\n",
                (int)scrinfo.xres, (int)scrinfo.yres,
                (int)scrinfo.xres_virtual, (int)scrinfo.yres_virtual,
                (int)scrinfo.xoffset, (int)scrinfo.yoffset,
                (int)scrinfo.bits_per_pixel);
-    info_print("  offset:length red=%d:%d green=%d:%d blue=%d:%d \n",
+    info_print("  offset:length red=%d:%d green=%d:%d blue=%d:%d  line_length=%d pad=%d\n",
                (int)scrinfo.red.offset, (int)scrinfo.red.length,
                (int)scrinfo.green.offset, (int)scrinfo.green.length,
-               (int)scrinfo.blue.offset, (int)scrinfo.blue.length);
+               (int)scrinfo.blue.offset, (int)scrinfo.blue.length, fixscrinfo.line_length,
+               padding8);
 
-    fbmmap = mmap(NULL, frame_size, PROT_READ, MAP_SHARED, fbfd, 0);
+    fbmmap = mmap(NULL, buffer_size, PROT_READ, MAP_SHARED, fbfd, 0);
 
     if (fbmmap == MAP_FAILED)
     {
@@ -197,7 +211,7 @@ static void init_fb_server(int argc, char **argv, rfbBool enable_touch)
 
     /* Allocate the comparison buffer for detecting drawing updates from frame
      * to frame. */
-    fbbuf = calloc(frame_size, 1);
+    fbbuf = calloc(buffer_size, 1);
     assert(fbbuf != NULL);
 
     /* TODO: This assumes scrinfo.bits_per_pixel is 16. */
@@ -276,7 +290,7 @@ static void update_screen(void)
         uint8_t *c = (uint8_t *)fbbuf;  /* -> compare framebuffer */
         uint8_t *r = (uint8_t *)vncbuf; /* -> remote framebuffer  */
 
-        if (memcmp(fbmmap, fbbuf, frame_size) != 0)
+        if (memcmp(fbmmap, fbbuf, buffer_size) != 0)
         {
             int y;
             for (y = 0; y < (int)scrinfo.yres; y++)
@@ -323,7 +337,7 @@ static void update_screen(void)
         uint8_t *r = (uint8_t *)vncbuf; /* -> remote framebuffer  */
 
         int xstep = 8;
-        if (memcmp(fbmmap, fbbuf, frame_size) != 0)
+        if (memcmp(fbmmap, fbbuf, buffer_size) != 0)
         {
             int y;
             for (y = 0; y < (int)scrinfo.yres; y++)
@@ -355,7 +369,7 @@ static void update_screen(void)
                             varblock.min_j = y;
                     }
 
-                    f += 1;
+                    f += 1+y*8;
                     c += 1;
                     r += 8;
                 }
@@ -367,19 +381,18 @@ static void update_screen(void)
         uint32_t *f = (uint32_t *)fbmmap; /* -> framebuffer         */
         uint32_t *c = (uint32_t *)fbbuf;  /* -> compare framebuffer */
         uint32_t *r = (uint32_t *)vncbuf; /* -> remote framebuffer  */
+        //int pad = padding / sizeof(uint32_t);
 
-        if (memcmp(fbmmap, fbbuf, frame_size) != 0)
+        //if (memcmp(fbmmap, fbbuf, buffer_size) != 0)
         {
             //        memcpy(fbbuf, fbmmap, size);
 
-            int xstep = 4 / bytespp;
+            int xstep = 2;
 
-            int y;
-            for (y = 0; y < (int)scrinfo.yres; y++)
+            for (int y = 0; y < (int)scrinfo.yres; y+= 1)
             {
                 /* Compare every 1/2/4 pixels at a time */
-                int x;
-                for (x = 0; x < (int)scrinfo.xres; x += xstep)
+                for (int x = 0; x < (int)scrinfo.xres; x += xstep)
                 {
                     uint32_t pixel = *f;
 
@@ -432,6 +445,8 @@ static void update_screen(void)
                     c++;
                     r++;
                 }
+               f+=padding32;
+               c+=padding32;
             }
         }
     }
@@ -458,7 +473,7 @@ static void update_screen(void)
             break;
         }
 
-        if (memcmp(fbmmap, fbbuf, frame_size) != 0)
+        if (memcmp(fbmmap, fbbuf, buffer_size) != 0)
         {
             int y;
             for (y = 0; y < (int)scrinfo.yres; y++)
@@ -467,7 +482,7 @@ static void update_screen(void)
                 int x;
                 for (x = 0; x < (int)scrinfo.xres; x++)
                 {
-                    uint16_t pixel = *f;
+                    uint16_t pixel = *(f+y*4);
 
                     if (pixel != *c)
                     {
@@ -540,8 +555,8 @@ static void update_screen(void)
                     (varblock.max_i + 2) - varblock.min_i, (varblock.max_j + 1) - varblock.min_j,
                     varblock.min_i, varblock.min_j);
 
-        rfbMarkRectAsModified(server, varblock.min_i, varblock.min_j,
-                              varblock.max_i + 2, varblock.max_j + 1);
+        rfbMarkRectAsModified(server, varblock.min_i-1, varblock.min_j-1,
+                              varblock.max_i + 2, varblock.max_j + 2);
 
         rfbProcessEvents(server, 10000);
     }
@@ -651,6 +666,7 @@ int main(int argc, char **argv)
 
         rfbProcessEvents(server, 100000);
         update_screen();
+        //sleep(0.3);
     }
 
     info_print("Cleaning up...\n");
