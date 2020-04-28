@@ -452,7 +452,7 @@ int main(int argc, char **argv)
 
         rfbProcessEvents(server, 100000);
         update_screen();
-        sleep(0.5);
+        //sleep(0.5);
     }
 
     info_print("Cleaning up...\n");
